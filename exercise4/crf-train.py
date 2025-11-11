@@ -4,11 +4,14 @@ import pickle
 from collections import defaultdict
 
 class CRFTagger:
-    def __init__(self, learning_rate = 0.01):
+    def __init__(self, learning_rate = 0.01, l1_lambda: float = 0.0):
         # Gewichtsvektor
         self.weights = defaultdict(float)
         self.tagset = set()
         self.learning_rate = learning_rate
+        # L1 regularization strength (λ). Applied via proximal operator
+        # (soft-thresholding) after each gradient step.
+        self.l1_lambda = float(l1_lambda)
 
 
     def read_data(self, path):
@@ -66,7 +69,7 @@ class CRFTagger:
         feats.append(f"PT-{prevtag}+{tag}")
 
         return feats
-
+    
     def lex_score(self, tag, words, i):
         """Berechnet lexikalischen Score: Summe aller Gewichte aktiver lexikalischer Merkmale."""
         score = 0.0
@@ -86,23 +89,26 @@ class CRFTagger:
         return self.lex_score(tag, words, i) + self.context_score(prevtag, tag, words, i)
 
     def forward(self, words):
-        """Berechnet Forward-Scores α[i][tag] entsprechend Folie."""
+        """Berechnet Forward-Scores α[i][tag] mit effizienter Berechnung der lexikalischen Scores."""
         alpha = [defaultdict(float)]
         alpha[0]["START"] = 0.0  # log(1)
 
         for i in range(1, len(words)):
             alpha.append(defaultdict(float))
 
-            # Bestimme Tag-Liste (letzte Position = END)
+            # Tag-Liste (letzte Position = END)
             tags = self.tagset if i < len(words) - 1 else ["//s"]
 
-            for tag in tags:
-                lexical_score = self.lex_score(tag, words, i)
-                total_scores = []
+            # (1) Lexikalische Scores einmal pro Position berechnen
+            lex_scores = {t: self.lex_score(t, words, i) for t in tags}
 
+            # (2) Kontext-Scores separat berechnen und addieren
+            for tag in tags:
+                total_scores = []
+                lex_s = lex_scores[tag]  # wiederverwendet statt neu berechnet
                 for prev_tag, prev_score in alpha[i - 1].items():
-                    count_score = prev_score + self.context_score(prev_tag, tag, words, i) + lexical_score
-                    total_scores.append(count_score)
+                    cs = self.context_score(prev_tag, tag, words, i)
+                    total_scores.append(prev_score + cs + lex_s)
 
                 # Log-Summe zur Stabilität (Unterlauf vermeiden)
                 m = max(total_scores)
@@ -186,9 +192,21 @@ class CRFTagger:
         obs = self.observed_freq(words, tags)
         exp = self.expected_freq(words)
 
+        # Gradient update
         for feat in set(obs.keys()) | set(exp.keys()):
             self.weights[feat] += self.learning_rate * (obs[feat] - exp[feat])
 
+        # L1 Regularisierung
+        for feat in list(self.weights.keys()):
+            w = self.weights[feat]
+            if w > 0:
+                w_new = max(0.0, w - self.learning_rate * self.l1_lambda)
+            else:
+                w_new = min(0.0, w + self.learning_rate * self.l1_lambda)
+            self.weights[feat] = w_new
+
+    # No evaluate_on_file here — evaluation is done by calling
+    # `tag_accuracy` from `crf-annotate.py` directly in the training loop.
 
     #test
     def check_feature_names(self, words, tags):
@@ -209,31 +227,70 @@ class CRFTagger:
                 print("FEHLER:", feat)
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python crf-train.py train.txt param-file")
+    if not (4 <= len(sys.argv) <= 5):
+        print("Usage: python crf-train.py train.txt dev.txt param-file [l1_lambda]")
         sys.exit(1)
 
     train_path = sys.argv[1]
-    param_path = sys.argv[2]
+    dev_path = sys.argv[2]
+    param_path = sys.argv[3]
+    l1_lambda = float(sys.argv[4]) if len(sys.argv) == 5 else 0.0
 
-    tagger = CRFTagger()
+    tagger = CRFTagger(l1_lambda=l1_lambda)
     train_data = tagger.read_data(train_path)
 
-    # Einmaliges Training (mehere Epochen sind möglich)
-    EPOCHS = 1
+    # Einmaliges Training (mehrere Epochen sind möglich)
+    EPOCHS = 3
+    best_acc = -1.0
+    best_weights = None
+
     for epoch in range(EPOCHS):
         for sentence in train_data:
-            print(sentence)
+            # optional: comment out verbose print if too noisy
+            # print(sentence)
             words = [w for w, _ in sentence]
             tags = [t for _, t in sentence]
             tagger.update_weights(words, tags)
+        # Nach jeder Epoche: Evaluierung auf Development-Daten
+        # Dynamically load tag_accuracy from crf-annotate.py and call it.
+        import os
+        import importlib.util
+        this_dir = os.path.dirname(__file__)
+        crf_annotate_path = os.path.join(this_dir, "crf-annotate.py")
+        spec = importlib.util.spec_from_file_location("crf_annotate_module", crf_annotate_path)
+        crf_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(crf_mod)
+        tag_accuracy = getattr(crf_mod, "tag_accuracy")
 
-    # Nach dem Training Parameter und Tagset speichern
-    with open(param_path, "wb") as f:
-        pickle.dump({
-            "weights": dict(tagger.weights),
-            "tagset": list(tagger.tagset)
-        }, f)
+        dev_data = tagger.read_data(dev_path)
+        acc = tag_accuracy(tagger, dev_data)
+        print(f"Epoch {epoch+1}/{EPOCHS} - dev accuracy: {acc:.4f}")
+
+        # Falls verbessert: aktuelle Gewichte speichern (Parameterdatei)
+        if acc > best_acc:
+            best_acc = acc
+            best_weights = dict(tagger.weights)
+            with open(param_path, "wb") as f:
+                pickle.dump({
+                    "weights": best_weights,
+                    "tagset": list(tagger.tagset)
+                }, f)
+            print(f"New best dev accuracy {best_acc:.4f} - parameters saved to {param_path}")
+
+    # Zum Schluss sicherstellen, dass die besten Gewichte gespeichert sind
+    if best_weights is not None:
+        with open(param_path, "wb") as f:
+            pickle.dump({
+                "weights": best_weights,
+                "tagset": list(tagger.tagset)
+            }, f)
+    else:
+        # Falls nie verbessert, speichere finale Gewichte
+        with open(param_path, "wb") as f:
+            pickle.dump({
+                "weights": dict(tagger.weights),
+                "tagset": list(tagger.tagset)
+            }, f)
     
   #  for i, (feat, weight) in enumerate(tagger.weights.items()):
   #      if i >= 10:
