@@ -76,6 +76,10 @@ class CRFTagger:
         shape = self.compute_shape(word)
         feats.append(f"SH-{shape}+{tag}")
 
+        # (4) Vorheriges Wort + aktuelles Tag (lexikalisches Merkmal)
+        prev_word = words[i - 1] if i > 0 else "<//s>"
+        feats.append(f"PW-{prev_word}+{tag}")
+
         # Im Cache speichern
         self._lex_features_cache[cache_key] = feats
         return feats
@@ -88,7 +92,7 @@ class CRFTagger:
         return shape
 
     def context_features(self, prevtag, tag, words, i):
-        """Kontextmerkmale abhängig vom vorherigen Wort und Tag."""
+        """Kontextmerkmale abhängig vom vorherigen Tag."""
         # Cache-Key: (prevtag, tag, i)
         cache_key = (prevtag, tag, i)
         if cache_key in self._context_features_cache:
@@ -96,11 +100,7 @@ class CRFTagger:
         
         feats = []
 
-        # (4) Vorheriges Wort + aktuelles Tag
-        prev_word = words[i - 1] if i > 0 else "<//s>"
-        feats.append(f"PW-{prev_word}+{tag}")
-
-        # (5) Vorheriges Tag + aktuelles Tag
+        # Vorheriges Tag + aktuelles Tag
         feats.append(f"PT-{prevtag}+{tag}")
 
         # Im Cache speichern
