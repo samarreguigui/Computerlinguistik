@@ -39,8 +39,8 @@ class Encoder(nn.Module):
         output, _ = pad_packed_sequence(packed_output, batch_first=True)
 
         # Extract LAST LAYER backward hidden state: hidden[-1]
-        backward_hidden_last = hidden[-1:].contiguous()
-        backward_cell_last = cell[-1:].contiguous()
+        backward_hidden_last = hidden[-1:]
+        backward_cell_last = cell[-1:]
 
         return output, backward_hidden_last, backward_cell_last
     
@@ -99,7 +99,7 @@ class Model(nn.Module):
         self.output_projection = nn.Linear(lstm_size, embedding_size)
 
         # Output layer: embedding → vocabulary logits
-        self.output_layer = nn.Linear(embedding_size, tgt_vocab_size, bias=False)
+        self.output_layer = nn.Linear(embedding_size, tgt_vocab_size, bias=True)
 
         # Tied embeddings: input and output share the same weight matrix
         self.output_layer.weight = self.embedding.weight
@@ -117,19 +117,19 @@ class Model(nn.Module):
         embs = self.dropout(self.embedding(tgt_letter_ids))
 
         # LSTM1: initializes with encoder backward states
-        dec_states1, states1 = self.lstm1(embs, (enc_hidden, enc_cell))
+        dec_states1, _ = self.lstm1(embs, (enc_hidden, enc_cell))
     
         #Attention for LSTM1 output
         context1 = self.attention(enc_states, dec_states1)
 
-        lstm2_input = torch.cat([dec_states1, context1], dim=-1)
+        lstm2_input = self.dropout(torch.cat([dec_states1, context1], dim=-1))
 
         # LSTM2
         dec_states2, states2 = self.lstm2(lstm2_input, (enc_hidden, enc_cell))
 
         # Attention for LSTM2 output
         context2 = self.attention(enc_states, dec_states2)
-        lstm3_input = torch.cat([dec_states2, context2], dim=-1)
+        lstm3_input = self.dropout(torch.cat([dec_states2, context2], dim=-1))
 
         # LSTM3
         dec_states3, states3 = self.lstm3(lstm3_input, (enc_hidden, enc_cell))
@@ -154,11 +154,9 @@ class Model(nn.Module):
         tgt_char_ids = torch.full((batch_size, 1), pad_id, dtype=torch.long, device=src_letter_ids.device)
 
         # Initialize previous states
-        prev_states1 = (enc_hidden, enc_cell)
-        prev_states2 = (enc_hidden, enc_cell)
-        prev_states3 = (enc_hidden, enc_cell)
+        prev_states1 = prev_states2 = prev_states3 = (enc_hidden, enc_cell)
 
-        all_tgt_char_ids = []
+        all_tgt_char_ids = None
 
         for _ in range(max_tgt_length):
 
@@ -172,88 +170,29 @@ class Model(nn.Module):
             context1 = self.attention(enc_states, dec_states1)
 
             # LSTM2
-            lstm2_input = torch.cat([dec_states1, context1], dim=-1)
+            lstm2_input = self.dropout(torch.cat([dec_states1, context1], dim=-1))
             dec_states2, prev_states2 = self.lstm2(lstm2_input, prev_states2)
 
             # Attention again
             context2 = self.attention(enc_states, dec_states2)
 
             # LSTM3
-            lstm3_input = torch.cat([dec_states2, context2], dim=-1)
+            lstm3_input = self.dropout(torch.cat([dec_states2, context2], dim=-1))
             dec_states3, prev_states3 = self.lstm3(lstm3_input, prev_states3)
 
             # Output
             proj = self.output_projection(dec_states3)
             logits = self.output_layer(proj)
 
-            next_char = logits.argmax(dim=-1)[:, -1]  # last timestep
-            all_tgt_char_ids.append(next_char)
+            next_char = logits.argmax(dim=-1)
+            all_tgt_char_ids = (torch.cat([all_tgt_char_ids, next_char], dim=1)
+                                if all_tgt_char_ids else next_char)
 
             # Prepare next input
-            tgt_char_ids = next_char.unsqueeze(1)
+            tgt_char_ids = next_char
 
             # Stop if all sequences have at least one PAD symbol
-            all_generated = torch.stack(all_tgt_char_ids, dim=1)
-            if torch.all(torch.any(all_generated == pad_id, dim=1), dim=0):
+            if torch.all(torch.any(all_tgt_char_ids == pad_id, dim=1), dim=0):
                 break
 
-        return torch.stack(all_tgt_char_ids, dim=1)
-
-    @torch.no_grad()
-    def predict(self, src_letter_ids, src_lengths, max_tgt_length):
-        # Encode input
-        enc_states, enc_hidden, enc_cell = self.encoder(src_letter_ids, src_lengths)
-        batch_size = src_letter_ids.size(0)
-
-        #Prepare output storage
-        all_tgt_char_ids = []
-
-        # Start with PAD token for every batch element
-        tgt_char_ids = torch.full((batch_size, 1), self.pad_id, dtype=torch.long, device=src_letter_ids.device)
-
-        # Initial states 
-        states1 = (enc_hidden, enc_cell)
-        states2 = (enc_hidden, enc_cell)
-        states3 = (enc_hidden, enc_cell)
-
-        for t in range(max_tgt_length):
-
-            #Embed last generated character
-            embs = self.embedding(tgt_char_ids)  # (batch, 1, emb_size)
-
-            # --- LSTM1 ---
-            dec_states1, states1 = self.lstm1(embs, states1)
-
-            # Attention → context
-            context1 = self.attention(enc_states, dec_states1)
-
-            # concat context with LSTM1 output
-            in2 = torch.cat([dec_states1, context1], dim=-1)
-
-            # --- LSTM2 ---
-            dec_states2, states2 = self.lstm2(in2, states2)
-
-            context2 = self.attention(enc_states, dec_states2)
-            in3 = torch.cat([dec_states2, context2], dim=-1)
-
-            # --- LSTM3 ---
-            dec_states3, states3 = self.lstm3(in3, states3)
-
-            # Projection + output
-            proj = self.output_projection(dec_states3)
-            logits = self.output_layer(proj)
-
-            # Greeedy decoding: pick the argmax
-            next_char = torch.argmax(logits, dim=-1)  
-            tgt_char_ids = next_char  
-
-            # Save generated character
-            all_tgt_char_ids.append(next_char.squeeze(1))  
-
-            # Stopp if ALL sequences output PAD in this step
-            all_generated = torch.stack(all_tgt_char_ids, dim=1) 
-            if torch.all(torch.any(all_generated == self.pad_id, dim=1), dim=0):
-                break
-
-        # Final output: shape (batch, decoded_length)
-        return torch.stack(all_tgt_char_ids, dim=1)
+        return all_tgt_char_ids
