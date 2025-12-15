@@ -186,7 +186,7 @@ class Model(nn.Module):
 
             next_char = logits.argmax(dim=-1)
             all_tgt_char_ids = (torch.cat([all_tgt_char_ids, next_char], dim=1)
-                                if all_tgt_char_ids else next_char)
+                                if all_tgt_char_ids is not None else next_char)
 
             # Prepare next input
             tgt_char_ids = next_char

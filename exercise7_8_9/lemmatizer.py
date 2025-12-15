@@ -18,6 +18,7 @@ def main():
     parser.add_argument("--embeddings_size", type=int, default=100)
     parser.add_argument("--lstm_size", type=int, default=400)
     parser.add_argument("--dropout_rate", type=float, default=0.5)
+    parser.add_argument("--output", type=str, default=None)
     
     args = parser.parse_args()
     
@@ -65,9 +66,18 @@ def main():
                 lemma = "".join(chars)
                 all_lemmas.append(lemma)
     
-    # Ergebnisse ausgeben (ein Lemma pro Zeile)
-    for lemma in all_lemmas:
-        print(lemma)
+    # Ausgabedatei bestimmen
+    if args.output is None:
+        output_file = args.inputfile + ".out"
+    else:
+        output_file = args.output
+    
+    # Ergebnisse in Datei schreiben (ein Lemma pro Zeile)
+    with open(output_file, "w", encoding="utf-8") as f:
+        for lemma in all_lemmas:
+            f.write(lemma + "\n")
+    
+    print(f"Output written to: {output_file}")
 
 if __name__ == "__main__":
     main()
