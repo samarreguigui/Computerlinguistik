@@ -66,15 +66,13 @@ def main():
                 lemma = "".join(chars)
                 all_lemmas.append(lemma)
     
-    # Ausgabedatei bestimmen
-    if args.output is None:
-        output_file = args.inputfile + ".out"
-    else:
-        output_file = args.output
+    # Ausgabedatei bestimmen (Standard: out.txt)
+    output_file = args.output if args.output else "out.txt"
     
-    # Ergebnisse in Datei schreiben (ein Lemma pro Zeile)
+    # Ergebnisse in Datei schreiben (ein Lemma pro Zeile, jedes Wort getrennt)
     with open(output_file, "w", encoding="utf-8") as f:
         for lemma in all_lemmas:
+            # Jedes Lemma in einer separaten Zeile
             f.write(lemma + "\n")
     
     print(f"Output written to: {output_file}")
